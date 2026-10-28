@@ -30,6 +30,28 @@ python -m pip install -e /path/to/CryptoLab
 
 ## 启动本地管理界面
 
+macOS 上可为管理界面使用独立的 `cryptolab` Conda 环境。首次配置时在项目根目录执行一次（若环境已存在，先检查并直接激活，不要删除重建）：
+
+```bash
+conda create -n cryptolab python=3.12 -y
+conda activate cryptolab
+python -m pip install -e '.[web,test]'
+python -m pip check
+python -m pytest -q
+```
+
+配置完成后，在项目根目录执行 `./start.sh`。本机也可以从任意目录使用一条命令启动：
+
+```bash
+"/Users/single/Desktop/小工具/start.sh"
+```
+
+脚本自动进入自身所在的项目目录，在脚本进程内激活 `cryptolab` 环境，使用 `127.0.0.1:8501` 启动 Streamlit；不需要提前执行 `conda activate`，也不会重复创建环境或安装依赖。若 8501 端口被占用，脚本会明确报错退出，不终止已有进程、不自动换端口。终端会持续显示运行日志，按 **Ctrl+C** 停止服务；只关闭浏览器标签页不会停止服务。
+
+脚本沿用已有的 `CRYPTOLAB_HOME` 设置；未设置时仍使用 `~/.cryptolab/`，数据与 Python 环境分开保存。此次安装仅选择 `web,test`，不需要在管理界面环境中安装 Gurobi 或 SageMath。源码以可编辑模式安装，移动项目目录后需要重新安装可编辑包。
+
+也可以手动启动：
+
 在仓库根目录和已安装 CryptoLab 的环境中执行：
 
 ```bash
