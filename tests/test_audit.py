@@ -46,6 +46,52 @@ def test_audit_failure_rolls_back_record_change(query):
     assert not query("SELECT * FROM run_changes")
 
 
+@pytest.mark.parametrize("edits,expected_duration,expected_fields", [
+    ({"started_at": "2025-01-01T00:00:02+00:00"}, 8, {"started_at", "duration_s"}),
+    ({"finished_at": "2025-01-01T08:00:20+08:00"}, 20, {"finished_at", "duration_s"}),
+    ({"started_at": None}, None, {"started_at", "duration_s"}),
+    ({"finished_at": None}, None, {"finished_at", "duration_s"}),
+    ({"finished_at": "2025-01-01T00:00:20+00:00", "duration_s": 7.5}, 7.5, {"finished_at", "duration_s"}),
+    ({"finished_at": "2025-01-01T00:00:20+00:00", "duration_s": 0}, 0, {"finished_at", "duration_s"}),
+    ({"finished_at": "2025-01-01T00:00:20+00:00", "duration_s": None}, None, {"finished_at", "duration_s"}),
+    ({"finished_at": None, "duration_s": 7.5}, 7.5, {"finished_at", "duration_s"}),
+    ({"notes": "只修改备注"}, 12.5, {"notes"}),
+])
+def test_time_corrections_keep_duration_audit_and_raw_snapshots(edits, expected_duration, expected_fields, query):
+    with track_run(project="p", experiment="e", params={"rounds": 8}) as run:
+        run.log_metrics({"weight": 16})
+    update_run(run.id, {"started_at": "2025-01-01T00:00:00+00:00",
+                        "finished_at": "2025-01-01T00:00:10+00:00", "duration_s": 12.5}, reason="原始时间")
+    before = query("SELECT * FROM runs")[0]
+    update_run(run.id, edits, reason="时间复核", expected_updated_at=before["updated_at"])
+    after = query("SELECT * FROM runs")[0]
+    assert after["duration_s"] == expected_duration
+    assert after["raw_params_json"] == before["raw_params_json"]
+    assert after["raw_metrics_json"] == before["raw_metrics_json"]
+    changes = query("SELECT * FROM run_changes WHERE reason=?", ("时间复核",))
+    assert {change["field_name"] for change in changes} == expected_fields
+    for change in changes:
+        field = change["field_name"]
+        assert json.loads(change["old_value_json"]) == before[field]
+        assert json.loads(change["new_value_json"]) == after[field]
+        assert change["actor"] == "local_user"
+
+
+def test_duration_audit_failure_rolls_back_time_and_derived_duration(query):
+    with track_run(project="p", experiment="e") as run:
+        pass
+    before = query("SELECT * FROM runs")[0]
+    with Database().connect() as connection:
+        connection.execute("""CREATE TRIGGER reject_duration_audit BEFORE INSERT ON run_changes
+                              WHEN NEW.field_name='duration_s'
+                              BEGIN SELECT RAISE(ABORT, 'duration audit blocked'); END""")
+    with pytest.raises(sqlite3.IntegrityError, match="duration audit blocked"):
+        update_run(run.id, {"started_at": "2025-01-01T00:00:00+00:00",
+                            "finished_at": "2025-01-01T00:00:10+00:00"}, reason="时间复核")
+    assert query("SELECT * FROM runs")[0] == before
+    assert not query("SELECT * FROM run_changes")
+
+
 def test_concurrent_corrections_keep_a_continuous_audit_chain(query):
     with track_run(project="p", experiment="e") as run:
         run.log_metrics({"value": -1})

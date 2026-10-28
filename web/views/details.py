@@ -3,6 +3,7 @@ import json
 import streamlit as st
 
 from cryptolab import confirm_run_stopped, get_batch_summary, restore_run, soft_delete_run, update_run
+from cryptolab.database import utc_timestamp
 from cryptolab.files import (available_logs, log_tail, open_attachment, open_log,
                              register_existing_file, scan_unregistered_files, search_log)
 from cryptolab.presentation import input_time, local_time
@@ -31,7 +32,9 @@ def _edit(row, zone):
             a, b = st.columns(2)
             start = a.text_input("开始时间（本地）", local_time(row["started_at"], zone), key=prefix + "start")
             end = b.text_input("结束时间（本地）", local_time(row["finished_at"], zone), key=prefix + "end")
-            duration = st.text_input("总耗时（秒，留空表示未知）", "" if row["duration_s"] is None else str(row["duration_s"]), key=prefix + "duration")
+            initial_duration = "" if row["duration_s"] is None else str(row["duration_s"])
+            duration = st.text_input("总耗时（秒，留空表示未知）", initial_duration, key=prefix + "duration",
+                                     help="修改开始或结束时间且未改动此项时，按时间差重算；任一时间未知则耗时未知。改动此项则使用输入值，主动清空表示未知。")
             notes = st.text_area("备注", row["notes"] or "", key=prefix + "notes")
             a, b, c = st.columns(3)
             solver_name = a.text_input("求解器", row["solver_name"] or "", key=prefix + "solver_name")
@@ -40,12 +43,18 @@ def _edit(row, zone):
             runtime = st.text_input("求解耗时（秒）", "" if row["solver_runtime_s"] is None else str(row["solver_runtime_s"]), key=prefix + "runtime")
             reason = st.text_input("修改原因（必填）", key=prefix + "reason")
             if st.form_submit_button("保存修改", type="primary"):
-                update_run(run_id, {"params": json_input(params), "metrics": json_input(metrics),
-                                    "started_at": input_time(start, zone), "finished_at": input_time(end, zone),
-                                    "duration_s": number_input(duration), "notes": notes or None,
-                                    "solver_name": solver_name or None, "solver_status": solver_status or None,
-                                    "solver_version": solver_version or None, "solver_runtime_s": number_input(runtime)},
-                           reason=reason, expected_updated_at=version)
+                changes = {"params": json_input(params), "metrics": json_input(metrics), "notes": notes or None,
+                           "solver_name": solver_name or None, "solver_status": solver_status or None,
+                           "solver_version": solver_version or None, "solver_runtime_s": number_input(runtime)}
+                # Defaults are not explicit edits. Send only changed times so
+                # unrelated edits preserve measured/manually specified duration.
+                for field, value in (("started_at", start), ("finished_at", end)):
+                    parsed = input_time(value, zone)
+                    if parsed != utc_timestamp(row[field]):
+                        changes[field] = parsed
+                if duration != initial_duration:
+                    changes["duration_s"] = number_input(duration)
+                update_run(run_id, changes, reason=reason, expected_updated_at=version)
                 _reset_editor(run_id)
                 flash("修改已保存并写入审计，原始快照未改变")
                 st.rerun()

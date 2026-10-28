@@ -120,6 +120,70 @@ def test_editor_rejects_stale_version_and_preserves_raw_snapshot():
     assert json.loads(row["raw_metrics_json"]) == {"value": 0}
 
 
+@pytest.mark.parametrize("edits,expected_duration,expected_fields", [
+    ({"start": "2025-01-01 08:00:02"}, 8, {"started_at", "duration_s"}),
+    ({"end": "2025-01-01 08:00:20"}, 20, {"finished_at", "duration_s"}),
+    ({"start": ""}, None, {"started_at", "duration_s"}),
+    ({"end": ""}, None, {"finished_at", "duration_s"}),
+    ({"end": "2025-01-01 08:00:20", "duration": "7.5"}, 7.5, {"finished_at", "duration_s"}),
+    ({"end": "2025-01-01 08:00:20", "duration": "12.50"}, 12.5, {"finished_at"}),
+    ({"end": "2025-01-01 08:00:20", "duration": "0"}, 0, {"finished_at", "duration_s"}),
+    ({"end": "2025-01-01 08:00:20", "duration": ""}, None, {"finished_at", "duration_s"}),
+    ({"end": "", "duration": "7.5"}, 7.5, {"finished_at", "duration_s"}),
+    ({"notes": "只修改备注"}, 12.5, {"notes"}),
+    ({"start": "2025-01-01T00:00:00Z"}, 12.5, set()),
+])
+def test_detail_time_edits_respect_duration_intent(edits, expected_duration, expected_fields):
+    with track_run(project="p", experiment="e", params={"rounds": 8}) as run:
+        run.log_metrics({"weight": 16})
+    update_run(run.id, {"started_at": "2025-01-01T00:00:00+00:00",
+                        "finished_at": "2025-01-01T00:00:10+00:00", "duration_s": 12.5}, reason="原始时间")
+    before = get_run(run.id)
+    app = app_on("实验详情", run.id)
+    prefix = f"edit_{run.id}_"
+    for field, value in edits.items():
+        widget = app.text_area if field == "notes" else app.text_input
+        widget(key=prefix + field).set_value(value)
+    app.text_input(key=prefix + "reason").set_value("页面时间复核")
+    button(app, "保存修改").click().run()
+    assert_clean(app)
+    after = get_run(run.id)
+    assert after["duration_s"] == expected_duration
+    assert after["raw_params_json"] == before["raw_params_json"]
+    assert after["raw_metrics_json"] == before["raw_metrics_json"]
+    changes = [change for change in after["changes"] if change["reason"] == "页面时间复核"]
+    assert {change["field_name"] for change in changes} == expected_fields
+    for change in changes:
+        field = change["field_name"]
+        assert json.loads(change["old_value_json"]) == before[field]
+        assert json.loads(change["new_value_json"]) == after[field]
+    # A second save with untouched fields must not recalculate an explicit or
+    # cleared duration, nor append extra audit entries.
+    app.text_input(key=prefix + "reason").set_value("再次核对，无修改")
+    button(app, "保存修改").click().run()
+    assert_clean(app)
+    assert get_run(run.id) == after
+
+
+def test_detail_completing_unknown_times_calculates_duration():
+    run_id = create_manual_run(project="p", experiment="e")
+    app = app_on("实验详情", run_id)
+    prefix = f"edit_{run_id}_"
+    app.text_input(key=prefix + "start").set_value("2025-01-01 08:00:00")
+    app.text_input(key=prefix + "reason").set_value("只知道开始时间")
+    button(app, "保存修改").click().run()
+    assert_clean(app)
+    assert get_run(run_id)["duration_s"] is None
+    app.text_input(key=prefix + "end").set_value("2025-01-01 08:00:10")
+    app.text_input(key=prefix + "reason").set_value("补齐结束时间")
+    button(app, "保存修改").click().run()
+    assert_clean(app)
+    row = get_run(run_id)
+    assert row["duration_s"] == 10
+    assert row["raw_params_json"] is row["raw_metrics_json"] is None
+    assert {item["field_name"] for item in row["changes"] if item["reason"] == "补齐结束时间"} == {"finished_at", "duration_s"}
+
+
 def test_detail_soft_delete_restore_and_confirmation_forms():
     run_id = create_manual_run(project="p", experiment="e")
     app = app_on("实验详情", run_id)
