@@ -1,8 +1,8 @@
-# CryptoLab — SDK、数据库与并发可靠性
+# CryptoLab — 本地实验记录与管理
 
-CryptoLab 是面向密码分析科研的本地实验记录 SDK，保存参数、结构化结果、时间、状态、日志和附件。它不执行或调度实验，也不包含密码算法或建模代码。Python >=3.11，核心仅使用标准库；Gurobi 和 pytest 均为可选依赖。
+CryptoLab 是面向密码分析科研的本地实验记录 SDK，保存参数、结构化结果、时间、状态、日志和附件。它不执行或调度实验，也不包含密码算法或建模代码。Python >=3.11，核心仅使用标准库；Streamlit、Gurobi 和 pytest 均为可选依赖。
 
-当前版本 0.2.0，已实现 [需求文档](docs/requirements.md) 的第一、二阶段。保留全部原有记录接口，新增心跳、状态查询、批次统计和人工修订审计。没有 Streamlit 页面或额外服务。数据库沿用第一阶段 schema v1，升级不会删除重建历史记录。原始需求文件及其副本均未改动；实现说明见 [设计文档](docs/design.md)。
+当前版本 **0.3.0**，已实现 [需求文档](docs/requirements.md) 的第一至第三阶段：SDK、并发可靠性与 Streamlit 管理界面。原有记录 API、连接管理、日志隔离和心跳机制保留，管理页面复用现有数据库事务层。数据库继续使用 schema v1，不删除重建历史记录。原始需求文件及其副本未改动；模块设计与验证记录见 [设计文档](docs/design.md)。
 
 ## 安装
 
@@ -12,9 +12,11 @@ CryptoLab 是面向密码分析科研的本地实验记录 SDK，保存参数、
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e .
-# 开发测试时安装：
+# SDK 测试依赖：
 python -m pip install -e '.[test]'
-python -m pytest
+# 可选：管理界面和全部测试依赖
+python -m pip install -e '.[web,test]'
+python -m pytest -q
 ```
 
 也可以使用已有的 Conda 环境（Python >=3.11）：
@@ -25,6 +27,30 @@ python -m pip install -e /path/to/CryptoLab
 ```
 
 在每个需要调用 SDK 的 Python/Conda 环境中安装即可。各环境可通过同一个 `CRYPTOLAB_HOME` 使用同一份本机数据。核心包不需要启动服务，也不导入 `gurobipy`。已有 Gurobi 环境可以直接使用；需要安装其 Python 包时可选择 `python -m pip install -e '.[gurobi]'`，许可证另行配置。
+
+## 启动本地管理界面
+
+在仓库根目录和已安装 CryptoLab 的环境中执行：
+
+```bash
+python -m pip install -e '.[web]'
+python -m streamlit run web/app.py --server.address 127.0.0.1
+```
+
+浏览器打开 `http://127.0.0.1:8501`。关闭界面不影响 SDK；不同 Conda 环境只要使用相同 `CRYPTOLAB_HOME`，就能查看同一份数据。仓库配置默认只监听回环地址并关闭使用统计，页面也会拒绝非回环地址配置。没有账号、云同步或远程实验接口。从其他目录启动时，传入 `web/app.py` 的绝对路径，并保留 `--server.address 127.0.0.1`。
+
+侧栏提供四个页面：
+
+| 页面 | 操作 |
+| --- | --- |
+| 实验列表 | 自动与手动记录统一展示；按项目、方案、Batch、轮数、开始日期、运行状态、求解状态、来源、算法和关键词筛选；可每 5 秒刷新；导出当前筛选的 CSV/JSON。 |
+| 项目管理 | 创建、重命名项目和实验方案，填写说明、方法及算法标签；查看方案内 Run 与批次汇总。 |
+| 实验详情 | 查看参数、结果、时间、复现信息、日志、附件和修改历史；人工修订、软删除/恢复、异常结束确认、附件补录。 |
+| 手动录入 | 为历史实验填写 JSON 参数/结果、真实时间、状态和备注，上传已有结果文件或日志；允许时间未知。 |
+
+默认显示时区为 `Asia/Shanghai`，可填写其他 IANA 时区。详情同时展示本地时间和 UTC 原值；日期筛选按选定时区换算，包含结束日期全天。历史时间未知的记录不会匹配开始日期筛选。时间输入为空表示未知；不带偏移量的输入按显示时区解释，夏令时歧义时间要求明确偏移量。
+
+CSV 使用 UTF-8 BOM，参数/指标保存为 JSON 单元格；可能被表格程序解释为公式的字符串增加前导单引号。JSON 导出保留数据类型、UTC 时间和空值，适合后续 Python 分析。导出范围与当前列表一致，不包含附件内容；附件单独下载。
 
 ## 数据位置
 
@@ -185,9 +211,9 @@ with track_run(project="示例", experiment="长实验", heartbeat_interval_s=30
 
 强制终止后，已经提交的参数、指标、附件元数据以及已经写入的日志文件保留。数据库中的 Run 仍可能是 `RUNNING`，结束时间和耗时为空；重新打开数据库不会删除它或改判失败。`output_path` 创建的文件和日志若尚未执行退出登记，可能只有磁盘文件、没有附件元数据。SDK 不自动恢复执行实验，也不猜测其真实结果。
 
-## 人工修订与审计（无界面）
+## 人工修订与审计
 
-按照需求文档的第二阶段补齐后端审计：
+界面与 Python 接口使用同一套审计逻辑：
 
 ```python
 from cryptolab import update_run
@@ -200,9 +226,80 @@ update_run(
 )
 ```
 
-允许修改 `params`、`metrics`、`notes`、`started_at`、`finished_at`、`duration_s`；要求非空原因，只允许已结束的 Run。`RUNNING`（包括待确认）不允许修订，状态和 raw 快照也不能通过该接口修改。更改和 `run_changes` 逐字段审计在同一事务中提交；任一部分失败全部回滚。`actor` 固定为 `local_user`，相同内容不产生审计条目。并发修订按提交顺序串行化，后一次的 old value 来自前一次已提交值。
+允许修改 `params`、`metrics`、`notes`、`started_at`、`finished_at`、`duration_s`，以及 `solver_name`、`solver_status`、`solver_version`、`solver_runtime_s`；要求非空原因，只允许已结束的 Run。`RUNNING`（包括待确认）不允许修订，状态和 raw 快照也不能通过该接口修改。更改和 `run_changes` 逐字段审计在同一事务中提交；任一部分失败全部回滚。`actor` 固定为 `local_user`，相同内容不产生审计条目。并发修订按提交顺序串行化，后一次的 old value 来自前一次已提交值。
 
-手工时间接受带时区的 ISO 8601 字符串并规范化为 UTC。修改开始/结束时间而不显式指定耗时时，根据两者重算耗时并追加审计；任一端未知则耗时为 `None`。JSON 参数/指标的原始快照保持冻结。界面编辑和手动新建历史记录仍留待第三阶段。
+手工时间接受带时区的 ISO 8601 字符串并规范化为 UTC。修改开始/结束时间而不显式指定耗时时，根据两者重算耗时并追加审计；任一端未知则耗时为 `None`。JSON 参数/指标的原始快照保持冻结。已删除记录必须先恢复再编辑。界面传入 `expected_updated_at` 做乐观并发校验，防止旧页面覆盖他人的新修改；旧版不传该参数的调用仍兼容。
+
+## 手动历史记录、软删除与恢复
+
+```python
+from cryptolab import create_manual_run, update_run, soft_delete_run, restore_run
+from cryptolab.records import get_run
+
+run_id = create_manual_run(
+    project="PRESENT 差分分析", experiment="历史 MILP 实验",
+    params={"rounds": 8}, metrics={"weight": 16},
+    started_at="2026-10-20T09:00:00+08:00",
+    finished_at="2026-10-20T09:02:00+08:00",
+    solver_name="Gurobi", solver_status="OPTIMAL",
+    notes="根据原始实验笔记录入", reason="整理历史实验",
+)
+row = get_run(run_id)
+update_run(run_id, {"notes": "已核对原始结果文件"},
+           reason="复核", expected_updated_at=row["updated_at"])
+soft_delete_run(run_id, reason="误录，暂时隐藏")
+restore_run(run_id, reason="核对后恢复")
+```
+
+`create_manual_run` 返回 UUID 字符串，也接受 `batch_id` 并复用批次参数合并规则。历史状态只能是 `COMPLETED / FAILED / INTERRUPTED`。缺失开始/结束时间、耗时保持 `None`；两端时间齐全且未提供耗时时按差值计算。`source='manual'`，不伪造进程 ID、心跳或自动运行快照。
+
+软删除设置 `deleted_at`，默认列表与批次统计排除这些记录；不会删除磁盘文件。详情和“已删除记录”列表可查看、恢复。运行中及待确认 Run 不允许删除。手动创建、字段修订、软删除、恢复、人工结束和附件补录均记录操作原因与 UTC 审计时间；数据库变更和审计同一事务提交。
+
+## 异常中断后的人工确认
+
+详情页只为心跳已超时的 `RUNNING` Run 提供“人工确认异常结束”：
+
+1. 先自行核实实验确实停止，填写原因并勾选确认。
+2. 保存时在短事务内重新核对状态、原心跳和 `updated_at`；任一变化均拒绝过期操作。
+3. 记录属于本机且 PID 已知时，通过信号 0 探测进程。PID 仍存活或权限不足无法确认时拒绝；不会发送终止信号。
+4. 仅允许确认成 `INTERRUPTED` 或 `FAILED`；不知道实际结束时间就留空，耗时也留空。确认操作的时间单独保存在审计里。
+
+旧记录的主机或 PID 缺失、主机名称变化时，无法自动验证，需要用户的明确确认。PID 被其他进程复用也会保守地拒绝；不要为了通过检查而修改 PID。确认会冻结自动 Run 最后已提交的参数和结果，不推断求解结论，也不恢复执行。
+
+Python 接口同样要求读取版本和明确确认：
+
+```python
+from cryptolab import confirm_run_stopped
+from cryptolab.records import get_run
+
+row = get_run("实际的 Run ID")
+# 仅在自行核实该实验已停止后调用；否则继续保持待确认。
+confirm_run_stopped(
+    row["id"], expected_heartbeat_at=row["last_heartbeat_at"],
+    expected_updated_at=row["updated_at"], confirmed_stopped=True,
+    status="INTERRUPTED", reason="核对进程已退出，实际结束时刻不明",
+)
+```
+
+## 日志、附件与异常中断后的补录
+
+日志默认显示末尾最多 256 KiB / 300 行，完整搜索流式读取，最多显示 200 段匹配内容。超长行按块搜索并保留跨块匹配；日志不会长期完整积累在 SDK 内存中。完整日志或附件在点击“准备下载”后交给 Streamlit 下载，不执行文件内容。
+
+“检测未登记文件 → 只读扫描”只检查当前 Run 目录，显示文件名、大小和 SHA-256，不修改 Run、附件表或状态。可对运行中 Run 扫描，但只有结束或安全确认后才能补录。补录前需要核对文件已写完、填写原因并明确提交；服务器重新计算散列、检查文件身份和时间戳，变更则要求重新扫描。符号链接、硬链接、多层路径穿越、FIFO 等非普通文件和 `.copy-` 临时文件均拒绝。复制/登记失败时保留可恢复的磁盘文件，不覆盖已有文件。
+
+后端函数也可独立于网页使用：
+
+```python
+from cryptolab.files import scan_unregistered_files, register_existing_file
+
+scan = scan_unregistered_files("实际的 Run ID")  # 只读
+# 从 scan["files"] 中选择已核实属于该实验、已写入完成的文件：
+# item = ...
+# register_existing_file(run_id, item["name"], expected_sha256=item["sha256"],
+#                        expected_size=item["size_bytes"], reason="中断后核对补录")
+```
+
+`cryptolab.files.add_attachment(run_id, path, reason=...)` 用于给已结束记录添加附件；`open_attachment(artifact_id)` 返回只读文件上下文。`cryptolab.records` 提供 `get_run`、`list_runs`、项目/方案管理查询，所有数据库访问仍复用 `Database.read/_write`，没有额外服务或连接池。
 
 ## API 与日志边界
 
@@ -219,7 +316,7 @@ update_run(
 | `run.output_path(name)` | 返回安全的 `Path`，支持相对子目录；结束时仅登记实际存在的文件。重复请求同一路径返回相同位置。 |
 | `get_run_status(run_id, heartbeat_timeout_s=120)` | 返回原始状态和只读推导状态 `display_status`，超时显示 `UNCONFIRMED`。超时参数仅限关键字传入。 |
 | `get_batch_summary(batch_id, heartbeat_timeout_s=120)` | 返回 Batch 作用域状态和五类互斥子 Run 计数。超时参数仅限关键字传入。 |
-| `update_run(run_id, changes, reason=...)` | 人工修订已结束记录并追加审计；`reason` 为必填关键字参数。 |
+| `update_run(run_id, changes, reason=..., expected_updated_at=None)` | 人工修订已结束记录并追加审计；`reason` 为必填关键字参数。 |
 
 除 `.id` 外，Run 的方法只能在其 `with` 内调用。对象不能重复进入。JSON 仅接受字符串键的字典和 JSON 标量、列表、嵌套字典；不支持集合、Path、NumPy 对象、元组、循环引用及 NaN/Infinity，需由调用者明确转换。非法值会直接报错，不会转换成无意义字符串。
 
@@ -229,7 +326,7 @@ Python 代理不保证捕获子进程、`sys.stdout.buffer`、文件描述符或
 
 普通异常标记 `FAILED`；`KeyboardInterrupt` / `SystemExit` 标记 `INTERRUPTED`，随后原异常原样向外传播。结束时冻结 `raw_params_json`、`raw_metrics_json`。记录器错误会报告到 stderr；若实验同时抛出异常，以实验异常为准。若某次记录调用失败后被用户捕获，SDK 仍会在退出时标记失败并重新抛出该记录错误，防止看似成功却丢失记录。存储完全不可写时，最终状态也可能无法更新，SDK 会明确报告；不会伪造成功。
 
-开始/结束/创建/更新时间使用带时区的 UTC ISO 8601；`duration_s` 用单调时钟记录，包括进入时建立记录和日志的开销，但不含退出后的附件散列与收尾。`solver_runtime_s` 是求解器报告的时间。心跳更新 `last_heartbeat_at` 和 `updated_at`；活跃状态判断只使用心跳，因为其他修改也会更新 `updated_at`。`process_id`、`thread_id` 始终表示创建 Run 的实验进程/线程。
+开始/结束/创建/更新时间使用带时区的 UTC ISO 8601；`duration_s` 用单调时钟记录，包括进入时建立记录和日志的开销，但不含退出后的附件散列与收尾。`solver_runtime_s` 是求解器报告的时间。**心跳只更新 `last_heartbeat_at`，不改变 `updated_at`**。`updated_at` 表示参数、结果、状态、附件登记或人工修订等最近持久化修改；写日志不逐行更新数据库。0.2.0 已被心跳推进过的旧 `updated_at` 无法可靠还原，升级不会猜测或重写历史值。`process_id`、`thread_id` 始终表示创建 Run 的实验进程/线程。
 
 只采集主机名、进程/线程 ID、工作目录及可识别的脚本路径。不采集环境变量、许可证、Token 或命令行参数；`command_json` 和 `git_commit` 本阶段为空。用户自己写入的日志和参数按原样保存。
 
@@ -253,7 +350,7 @@ Gurobi Environment 不应在线程间共享；若自行并行求解，请为各�
 
 ## 读取与筛选 SQLite 记录
 
-无需额外查询层，普通数字、字符串、布尔值可使用 SQLite `json_extract` 筛选：
+常见查询可用 `cryptolab.records.list_runs(...)`；需要自定义分析时，普通数字、字符串、布尔值也可直接使用 SQLite `json_extract` 筛选：
 
 ```python
 import json
@@ -284,19 +381,24 @@ SDK 初始化六张表并建立索引，设置 `foreign_keys=ON`、WAL、5 秒 b
 
 ## 测试与本次验收
 
-运行 `python -m pytest -q`。全部测试自动使用临时 `CRYPTOLAB_HOME`，不写入真实默认数据目录。
+```bash
+python -m pip install -e '.[web,test]'
+python -m pytest -q
+```
 
-本次完整结果为 **116 passed**：保留 70 项第一阶段测试（初始心跳断言按新行为调整），新增 46 项。覆盖 4 个独立 Python 进程同时初始化、进程池 40/80 Run、线程池 60/80 Run、并行查询、ID/参数/结果/日志/附件隔离、子进程失败与强制终止、锁竞争与有限重试、周期心跳及其停止、修订审计与事务回滚。
+本次完整结果为 **170 passed in 5.17s**，无失败或跳过。全部测试使用临时 `CRYPTOLAB_HOME`，不写入真实默认目录。完整测试包括原有 116 项回归、时间语义、管理操作及审计回滚、安全人工确认、文件补录、筛选导出、时区和 Streamlit AppTest 交互测试。并发部分实际启动独立 Python 子进程、spawn 进程池（40/80 Run）和线程池（60/80 Run），验证日志、ID、参数及结果隔离，并检查 UI 查询与 SDK 写入同时进行。
 
-两个并行示例分别实际生成 40 和 60 个完成 Run；默认 30 秒心跳也做了真实等待验证。第一阶段真实数据库副本追加新记录后，旧记录保持不变。执行环境与详细结果见 [设计文档的验证记录](docs/design.md)。
+仅安装 `[test]` 时 SDK 和管理后端测试正常执行，Streamlit 页面测试会因缺少可选依赖而跳过；完整验收需安装 `[web,test]`。具体执行环境、通过数量与实际页面验证见 [设计文档的验证记录](docs/design.md)。
 
-## 已知限制与后续阶段
+## 已知限制
 
 - 心跳是尽力而为：持有 GIL 的原生计算、系统休眠、时钟调整或长时间数据库争用可能导致延迟。待确认不等于进程死亡；心跳恢复后查询状态也会恢复。
 - 支持本机文件系统，未经网络共享目录或多机环境验收。并发写入最终由 SQLite 串行化，超过有限锁等待预算会明确报错。
 - 日志逐条 flush，不在内存长期积累，但不逐条 `fsync`；强制进程终止测试不等于断电持久性测试。跨进程环境使用 spawn；活跃 Run 或其他后台线程存在时不要 fork。
 - Gurobi 仍为可选依赖。已验证假模型在并发 Run 中的属性与状态隔离，未进行真实许可证环境下的并发求解验证；环境、模型及求解器线程数由调用者管理。
-- 第三阶段尚未实现：全部 Streamlit 页面、手动补录、界面编辑、软删除、日志/附件浏览、筛选和导出。没有 `web` 依赖或 Web 启动入口。
+- 界面面向个人本机数据量，查询结果和 CSV/JSON 导出暂不分页；Streamlit 下载会在内存准备文件，超大日志或附件建议从数据目录用本地工具处理。上传受 Streamlit 默认文件大小限制（200 MB/文件）。
+- 附件安全读取使用 macOS/Linux 的 `dir_fd` 与 `O_NOFOLLOW`；本次在 macOS 验证，未提供 Windows 界面附件兼容性保证。磁盘文件在补录后仍可能被外部程序修改；元数据散列表示登记时的内容，不是持续文件锁。
+- 没有实验调度、网页启动/终止实验、远程运行、账号、云同步或永久删除功能。
 - 真正的数据库版本迁移脚本随以后 schema 变化编写；当前只提供初始版本与兼容性检查。未自动采集 Git 提交或命令行。
 
 本项目没有修改任何已有密码分析实验。`examples/` 中均为独立模拟实验。

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cryptolab"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lightweight local experiment records for cryptanalysis research"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,6 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 test = ["pytest>=8"]
 gurobi = ["gurobipy>=10"]
+web = ["streamlit>=1.50,<2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

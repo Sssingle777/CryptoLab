@@ -108,6 +108,18 @@ def test_unknown_ids_are_explicit_errors():
         get_batch_summary("missing")
 
 
+def test_heartbeat_does_not_change_last_content_modification(query):
+    with track_run(project="p", experiment="time semantics", heartbeat_interval_s=60) as run:
+        before = query("SELECT updated_at,last_heartbeat_at FROM runs")[0]
+        time.sleep(0.002)
+        Database().heartbeat(run.id)
+        after = query("SELECT updated_at,last_heartbeat_at FROM runs")[0]
+        assert after["updated_at"] == before["updated_at"]
+        assert after["last_heartbeat_at"] > before["last_heartbeat_at"]
+        run.log_metrics({"changed": True})
+        assert query("SELECT updated_at FROM runs")[0]["updated_at"] > before["updated_at"]
+
+
 def test_exception_stops_heartbeat_preserves_original_and_partial_metrics(query):
     original = RuntimeError("long calculation failed")
     with pytest.raises(RuntimeError) as caught:

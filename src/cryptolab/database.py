@@ -73,6 +73,28 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def utc_timestamp(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("Times must be timezone-aware ISO 8601 strings or None")
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("Times must include a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def audit_change(connection: sqlite3.Connection, run_id: str, field: str,
+                 old: Any, new: Any, reason: str, now: str) -> None:
+    connection.execute(
+        """INSERT INTO run_changes(id,run_id,changed_at,field_name,old_value_json,
+           new_value_json,reason,actor) VALUES (?,?,?,?,?,?,?,'local_user')""",
+        (str(uuid4()), run_id, now, field,
+         json.dumps(old, ensure_ascii=False, allow_nan=False),
+         json.dumps(new, ensure_ascii=False, allow_nan=False), reason),
+    )
+
+
 def encode_dict(value: dict[str, Any]) -> str:
     """Accept JSON objects without silently converting keys or nonfinite floats."""
     if not isinstance(value, dict):
@@ -224,24 +246,9 @@ class Database:
                    metadata: dict[str, Any]) -> None:
         params = snapshot(params)
         def write(connection: sqlite3.Connection) -> None:
-            if batch_id is not None:
-                batch = connection.execute(
-                    """SELECT b.experiment_id,b.common_params_json,p.name AS project_name,
-                       e.name AS experiment_name FROM batches b
-                       JOIN experiments e ON e.id=b.experiment_id
-                       JOIN projects p ON p.id=e.project_id WHERE b.id=?""", (batch_id,),
-                ).fetchone()
-                if batch is None:
-                    raise ValueError(f"Unknown batch_id: {batch_id}")
-                if project is not None and project != batch["project_name"]:
-                    raise ValueError("project does not match batch_id")
-                if experiment is not None and experiment != batch["experiment_name"]:
-                    raise ValueError("experiment does not match batch_id")
-                experiment_id = batch["experiment_id"]
-                effective_params = json.loads(batch["common_params_json"]) | params
-            else:
-                experiment_id = self._experiment(connection, project, experiment, now)
-                effective_params = params
+            experiment_id, effective_params = self.resolve_run(
+                connection, project, experiment, batch_id, params, now,
+            )
             connection.execute(
                 """INSERT INTO runs(id,experiment_id,batch_id,params_json,metrics_json,source,
                    status,started_at,created_at,updated_at,hostname,process_id,thread_id,
@@ -252,6 +259,26 @@ class Database:
                  metadata["script_path"], metadata["working_directory"], now),
             )
         self._write(write)
+
+    @classmethod
+    def resolve_run(cls, connection: sqlite3.Connection, project: str | None,
+                    experiment: str | None, batch_id: str | None,
+                    params: dict[str, Any], now: str) -> tuple[str, dict[str, Any]]:
+        if batch_id is None:
+            return cls._experiment(connection, project, experiment, now), params
+        batch = connection.execute(
+            """SELECT b.experiment_id,b.common_params_json,p.name AS project_name,
+               e.name AS experiment_name FROM batches b
+               JOIN experiments e ON e.id=b.experiment_id
+               JOIN projects p ON p.id=e.project_id WHERE b.id=?""", (batch_id,),
+        ).fetchone()
+        if batch is None:
+            raise ValueError(f"Unknown batch_id: {batch_id}")
+        if project is not None and project != batch["project_name"]:
+            raise ValueError("project does not match batch_id")
+        if experiment is not None and experiment != batch["experiment_name"]:
+            raise ValueError("experiment does not match batch_id")
+        return batch["experiment_id"], json.loads(batch["common_params_json"]) | params
 
     def merge_values(self, run_id: str, field: str, values: dict[str, Any],
                      solver: dict[str, Any] | None = None) -> None:
@@ -306,30 +333,35 @@ class Database:
     def save_artifact(self, run_id: str, kind: str, original_name: str,
                       relative_path: str, size: int, sha256: str) -> None:
         def write(connection: sqlite3.Connection) -> None:
+            now = utc_now()
             connection.execute(
                 """INSERT INTO artifacts(id,run_id,kind,original_name,relative_path,
                    size_bytes,sha256,created_at) VALUES (?,?,?,?,?,?,?,?)
                    ON CONFLICT(relative_path) DO UPDATE SET
                    size_bytes=excluded.size_bytes,sha256=excluded.sha256""",
-                (str(uuid4()), run_id, kind, original_name, relative_path, size, sha256, utc_now()),
+                (str(uuid4()), run_id, kind, original_name, relative_path, size, sha256, now),
             )
+            connection.execute("UPDATE runs SET updated_at=? WHERE id=?", (now, run_id))
         self._write(write)
 
     def heartbeat(self, run_id: str) -> bool:
         def write(connection: sqlite3.Connection) -> bool:
             now = utc_now()
             return connection.execute(
-                "UPDATE runs SET last_heartbeat_at=?,updated_at=? WHERE id=? AND status='RUNNING'",
-                (now, now, run_id),
+                "UPDATE runs SET last_heartbeat_at=? WHERE id=? AND status='RUNNING'",
+                (now, run_id),
             ).rowcount == 1
         # Heartbeats are best effort and must not delay context cleanup for the
         # full foreground retry budget. The next tick retries naturally.
         return self._write(write, retry=False, busy_timeout_ms=250)
 
-    def update_run(self, run_id: str, changes: dict[str, Any], reason: str) -> None:
+    def update_run(self, run_id: str, changes: dict[str, Any], reason: str,
+                   expected_updated_at: str | None = None) -> None:
         """Correct a finished record and append audit rows in the same transaction."""
         fields = {"params": "params_json", "metrics": "metrics_json", "notes": "notes",
-                  "started_at": "started_at", "finished_at": "finished_at", "duration_s": "duration_s"}
+                  "started_at": "started_at", "finished_at": "finished_at", "duration_s": "duration_s",
+                  "solver_name": "solver_name", "solver_status": "solver_status",
+                  "solver_version": "solver_version", "solver_runtime_s": "solver_runtime_s"}
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("A nonempty reason is required for a manual correction")
         if not isinstance(changes, dict) or not changes or any(key not in fields for key in changes):
@@ -339,17 +371,12 @@ class Database:
             if key in ("params", "metrics"):
                 value = encode_dict(value)
             elif key in ("started_at", "finished_at") and value is not None:
-                if not isinstance(value, str):
-                    raise TypeError("Times must be timezone-aware ISO 8601 strings or None")
-                parsed = datetime.fromisoformat(value)
-                if parsed.tzinfo is None or parsed.utcoffset() is None:
-                    raise ValueError("Times must include a timezone")
-                value = parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
-            elif key == "duration_s" and value is not None:
+                value = utc_timestamp(value)
+            elif key in ("duration_s", "solver_runtime_s") and value is not None:
                 if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
                     raise ValueError("duration_s must be a finite nonnegative number or None")
-            elif key == "notes" and value is not None and not isinstance(value, str):
-                raise TypeError("notes must be a string or None")
+            elif key in ("notes", "solver_name", "solver_status", "solver_version") and value is not None and not isinstance(value, str):
+                raise TypeError(f"{key} must be a string or None")
             values[fields[key]] = value
 
         def write(connection: sqlite3.Connection) -> None:
@@ -358,6 +385,10 @@ class Database:
                 raise ValueError(f"Unknown run_id: {run_id}")
             if row["status"] == "RUNNING":
                 raise ValueError("Cannot manually edit a RUNNING Run, including unconfirmed Runs")
+            if row["deleted_at"] is not None:
+                raise ValueError("Restore the deleted Run before editing")
+            if expected_updated_at is not None and row["updated_at"] != expected_updated_at:
+                raise ValueError("Record changed; reload before saving")
             updated = dict(row) | values
             start, end = updated["started_at"], updated["finished_at"]
             elapsed = None
@@ -379,11 +410,5 @@ class Database:
                     continue
                 # field is selected exclusively from the fixed mapping above.
                 connection.execute(f"UPDATE runs SET {field}=?,updated_at=? WHERE id=?", (value, now, run_id))
-                connection.execute(
-                    """INSERT INTO run_changes(id,run_id,changed_at,field_name,
-                       old_value_json,new_value_json,reason,actor) VALUES (?,?,?,?,?,?,?,'local_user')""",
-                    (str(uuid4()), run_id, now, field,
-                     json.dumps(old_json, ensure_ascii=False, allow_nan=False),
-                     json.dumps(new_json, ensure_ascii=False, allow_nan=False), reason),
-                )
+                audit_change(connection, run_id, field, old_json, new_json, reason, now)
         self._write(write)

@@ -20,6 +20,7 @@ def track_batch(*, project: str, experiment: str, name: str | None = None,
     return Batch(project=project, experiment=experiment, name=name, common_params=common_params)
 
 
-def update_run(run_id: str, changes: dict[str, Any], *, reason: str) -> None:
+def update_run(run_id: str, changes: dict[str, Any], *, reason: str,
+               expected_updated_at: str | None = None) -> None:
     """Manually correct a finished Run with an audit trail; raw snapshots stay frozen."""
-    Database().update_run(run_id, changes, reason)
+    Database().update_run(run_id, changes, reason, expected_updated_at)
